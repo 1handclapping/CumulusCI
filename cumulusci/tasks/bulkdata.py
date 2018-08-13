@@ -458,16 +458,9 @@ class QueryData(BaseSalesforceApiTask):
                 "job/{0}/batch/{1}/result/{2}".format(
                     job_id, batch_id, result_id),
             )
-            resp = requests.get(uri, headers=self.bulk.headers(), stream=True)
-            with tempfile.TemporaryFile() as tmp:
-                # First download the full result to a local file
-                # (processing the results while streaming them from the server
-                # tends to result in connection resets)
-                shutil.copyfileobj(resp.raw, tmp)
-                self.logger.info('Result {} downloaded'.format(result_id))
-                tmp.seek(0)
-                with gzip.GzipFile(fileobj=tmp, mode='rb') as f:
-                    yield f
+            resp = requests.get(uri, headers=self.bulk.headers())
+            self.logger.info('Result {} downloaded'.format(result_id))
+            yield resp.content
 
     def _import_row(self, row, mapping, field_map):
         model = self.models[mapping['table']]
