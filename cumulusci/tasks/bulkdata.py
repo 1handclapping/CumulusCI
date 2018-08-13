@@ -2,6 +2,7 @@ from cumulusci.tasks.salesforce import BaseSalesforceApiTask
 
 import csv
 import datetime
+import gzip
 import requests
 import shutil
 import tempfile
@@ -458,15 +459,15 @@ class QueryData(BaseSalesforceApiTask):
                     job_id, batch_id, result_id),
             )
             resp = requests.get(uri, headers=self.bulk.headers(), stream=True)
-            with tempfile.TemporaryFile() as f:
+            with tempfile.TemporaryFile() as tmp:
                 # First download the full result to a local file
                 # (processing the results while streaming them from the server
                 # tends to result in connection resets)
-                shutil.copyfileobj(resp.raw, f)
+                shutil.copyfileobj(resp.raw, tmp)
                 self.logger.info('Result {} downloaded'.format(result_id))
-                # Now return to the start of the file and yield for processing
-                f.seek(0)
-                yield f
+                tmp.seek(0)
+                with gzip.GzipFile(fileobj=tmp, mode='rb') as f:
+                    yield f
 
     def _import_row(self, row, mapping, field_map):
         model = self.models[mapping['table']]
