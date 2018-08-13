@@ -458,7 +458,7 @@ class QueryData(BaseSalesforceApiTask):
                     job_id, batch_id, result_id),
             )
             resp = requests.get(uri, headers=self.bulk.headers(), stream=True)
-            with tempfile.TemporaryFile('wb') as f:
+            with tempfile.TemporaryFile() as f:
                 # First download the full result to a local file
                 # (processing the results while streaming them from the server
                 # tends to result in connection resets)
