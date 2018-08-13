@@ -1,13 +1,16 @@
 from cumulusci.tasks.salesforce import BaseSalesforceApiTask
 
 import csv
-import time
-import hiyapyco
-import xml.etree.ElementTree as ET
-
 import datetime
 import requests
+import shutil
 import tempfile
+import time
+import unicodecsv
+import urlparse
+import xml.etree.ElementTree as ET
+
+import hiyapyco
 import unicodecsv
 
 from collections import OrderedDict
@@ -431,8 +434,8 @@ class QueryData(BaseSalesforceApiTask):
             field_map[field['sf']] = field['db']
 
         i = 0
-        for result in self.bulk.get_all_results_for_query_batch(batch, job):
-            reader = unicodecsv.DictReader(result, encoding='utf-8')
+        for result_file in self._get_results(batch, job):
+            reader = unicodecsv.DictReader(result_file, encoding='utf-8')
             for row in reader:
                 self._import_row(row, mapping, field_map)
                 # Flush inserts to db periodically to avoid eating RAM
@@ -442,6 +445,28 @@ class QueryData(BaseSalesforceApiTask):
                     self.session.flush()
 
         self.session.commit()
+
+    def _get_results(self, batch_id, job_id):
+        result_ids = self.bulk.get_query_batch_result_ids(batch_id, job_id=job_id)
+        if not result_ids:
+            raise RuntimeError('Batch is not complete')
+        for result_id in result_ids:
+            self.logger.info('Result id: {}'.format(result_id))
+            uri = urlparse.urljoin(
+                self.bulk.endpoint + "/",
+                "job/{0}/batch/{1}/result/{2}".format(
+                    job_id, batch_id, result_id),
+            )
+            resp = requests.get(uri, headers=self.bulk.headers(), stream=True)
+            with tempfile.TemporaryFile('wb') as f:
+                # First download the full result to a local file
+                # (processing the results while streaming them from the server
+                # tends to result in connection resets)
+                shutil.copyfileobj(resp.raw, f)
+                self.logger.info('Result {} downloaded'.format(result_id))
+                # Now return to the start of the file and yield for processing
+                f.seek(0)
+                yield f
 
     def _import_row(self, row, mapping, field_map):
         model = self.models[mapping['table']]
