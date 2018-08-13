@@ -3,6 +3,7 @@ from cumulusci.tasks.salesforce import BaseSalesforceApiTask
 import csv
 import datetime
 import gzip
+import io
 import requests
 import shutil
 import tempfile
@@ -31,7 +32,6 @@ from sqlalchemy import Unicode
 from sqlalchemy import text
 from sqlalchemy import types
 from sqlalchemy import event
-from StringIO import StringIO
 
 # TODO: UserID Catcher
 # TODO: Dater
@@ -460,7 +460,7 @@ class QueryData(BaseSalesforceApiTask):
             )
             resp = requests.get(uri, headers=self.bulk.headers())
             self.logger.info('Result {} downloaded'.format(result_id))
-            yield resp.content
+            yield io.BytesIO(resp.content)
 
     def _import_row(self, row, mapping, field_map):
         model = self.models[mapping['table']]
