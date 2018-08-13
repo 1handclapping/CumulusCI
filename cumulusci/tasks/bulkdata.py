@@ -430,10 +430,16 @@ class QueryData(BaseSalesforceApiTask):
         for field in self._fields_for_mapping(mapping):
             field_map[field['sf']] = field['db']
 
+        i = 0
         for result in self.bulk.get_all_results_for_query_batch(batch, job):
             reader = unicodecsv.DictReader(result, encoding='utf-8')
             for row in reader:
                 self._import_row(row, mapping, field_map)
+                # Flush inserts to db periodically to avoid eating RAM
+                i += 1
+                if not i % 10000:
+                    self.logger.info('Processed {} rows.'.format(i))
+                    self.session.flush()
 
         self.session.commit()
 
