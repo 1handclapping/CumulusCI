@@ -516,7 +516,7 @@ class QueryData(BaseSalesforceApiTask):
             fields.append(Column(field['db'], field_type, **kw))
         record_type = mapping.get('record_type')
         if record_type:
-            fields.append(Column('record_type'), Unicode(255))
+            fields.append(Column('record_type', Unicode(255)))
         t = Table(
             mapping['table'],
             self.metadata,
