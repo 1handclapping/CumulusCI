@@ -350,14 +350,21 @@ class LoadData(BaseSalesforceApiTask):
             loglevel='INFO'
         )
 
-# def log_progress(iterable, logger, batch_size=10000):
-#     i = 0
-#     for x in iterable:
-#         yield x
-#         i += 1
-#         if not i % batch_size:
-#             logger.info('Processing... ({})'.format(i))
-#     logger.info('Done! Processed {} records'.format(i))
+def process_incoming_rows(f, record_type=None):
+    for line in f:
+        if record_type:
+            yield line[:-1] + record_type + '\n'
+        else:
+            yield line
+
+def log_progress(iterable, logger, batch_size=10000):
+    i = 0
+    for x in iterable:
+        yield x
+        i += 1
+        if not i % batch_size:
+            logger.info('Processing... ({})'.format(i))
+    logger.info('Done! Processed {} records'.format(i))
 
 class QueryData(BaseSalesforceApiTask):
     task_options = {
@@ -441,12 +448,19 @@ class QueryData(BaseSalesforceApiTask):
                 for sf in sf_header:
                     column = mapping['fields'].get(sf) or mapping['lookups'][sf]['key_field']
                     columns.append(column)
+                record_type = mapping.get('record_type')
+                if record_type:
+                    columns.append('record_type')
+                processor = log_progress(
+                    process_incoming_rows(result_file, record_type),
+                    self.logger,
+                )
                 cursor.copy_expert(
                     'COPY {} ({}) FROM STDIN WITH (FORMAT CSV)'.format(
                         mapping['table'],
                         b','.join(columns),
                     ),
-                    IteratorBytesIO(result_file),
+                    IteratorBytesIO(processor),
                 )
                 self.session.commit()
 
@@ -500,6 +514,9 @@ class QueryData(BaseSalesforceApiTask):
                 field_type = Unicode(18)
                 kw['primary_key'] = True
             fields.append(Column(field['db'], field_type, **kw))
+        record_type = mapping.get('record_type')
+        if record_type:
+            fields.append(Column('record_type'), Unicode(255))
         t = Table(
             mapping['table'],
             self.metadata,
