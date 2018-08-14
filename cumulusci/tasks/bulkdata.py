@@ -446,6 +446,8 @@ class QueryData(BaseSalesforceApiTask):
                 sf_header = reader.next()
                 columns = []
                 for sf in sf_header:
+                    if sf == 'Records not found for this query':
+                        continue
                     column = mapping['fields'].get(sf) or mapping['lookups'][sf]['key_field']
                     columns.append(column)
                 record_type = mapping.get('record_type')
