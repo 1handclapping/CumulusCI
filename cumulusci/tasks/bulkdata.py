@@ -353,7 +353,7 @@ class LoadData(BaseSalesforceApiTask):
 def process_incoming_rows(f, record_type=None):
     for line in f:
         if record_type:
-            yield line[:-1] + record_type + '\n'
+            yield line[:-1] + b',' + record_type + b'\n'
         else:
             yield line
 
