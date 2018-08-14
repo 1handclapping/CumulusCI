@@ -462,9 +462,9 @@ class QueryData(BaseSalesforceApiTask):
             with tempfile.TemporaryFile('w+b') as f:
                 for chunk in resp.iter_content(chunk_size=None):
                     f.write(chunk)
-            f.seek(0)
-            self.logger.info('Result {} downloaded'.format(result_id))
-            yield f
+                f.seek(0)
+                self.logger.info('Result {} downloaded'.format(result_id))
+                yield f
 
     def _create_tables(self):
         for name, mapping in self.mappings.items():
