@@ -437,7 +437,10 @@ class QueryData(BaseSalesforceApiTask):
                 # Map column names
                 reader = csv.reader(result_file)
                 sf_header = reader.next()
-                columns = tuple(mapping['fields'][sf] for sf in sf_header)
+                columns = []
+                for sf in sf_header:
+                    column = mapping['fields'].get(sf) or mapping['lookups'][sf]['key_field']
+                    columns.append(column)
                 cursor.copy_expert(
                     'COPY {} ({}) FROM STDIN WITH (FORMAT CSV)'.format(
                         mapping['table'],
