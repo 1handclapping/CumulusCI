@@ -4,6 +4,7 @@ import csv
 import datetime
 import gzip
 import io
+import os
 import requests
 import shutil
 import tempfile
@@ -18,6 +19,7 @@ import unicodecsv
 from collections import OrderedDict
 
 from salesforce_bulk import CsvDictsAdapter
+from salesforce_bulk.util import IteratorBytesIO
 
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.orm import create_session
@@ -348,6 +350,15 @@ class LoadData(BaseSalesforceApiTask):
             loglevel='INFO'
         )
 
+# def log_progress(iterable, logger, batch_size=10000):
+#     i = 0
+#     for x in iterable:
+#         yield x
+#         i += 1
+#         if not i % batch_size:
+#             logger.info('Processing... ({})'.format(i))
+#     logger.info('Done! Processed {} records'.format(i))
+
 class QueryData(BaseSalesforceApiTask):
     task_options = {
         'database_url': {
@@ -364,8 +375,7 @@ class QueryData(BaseSalesforceApiTask):
         self._init_mapping()
         self._init_db()
 
-        for name, mapping in self.mappings.items():
-            fields = self._fields_for_mapping(mapping)
+        for mapping in self.mappings.values():
             soql = self._soql_for_mapping(mapping)
             self._run_query(soql, mapping)
 
@@ -388,9 +398,6 @@ class QueryData(BaseSalesforceApiTask):
 
         # Loop through mappings and reflect each referenced table
         self.tables = {}
-        #for name, mapping in self.mapping.items():
-            #if 'table' in mapping and mapping['table'] not in self.tables:
-                #self.tables[mapping['table']] = self.base.classes[mapping['table']]
 
         # initialize session
         self.session = create_session(bind=self.engine, autocommit=False)
@@ -400,12 +407,6 @@ class QueryData(BaseSalesforceApiTask):
             self.options['mapping'],
             loglevel='INFO'
         )
-        #self.mappings = [(name, mapping) for name, mapping in self.mappings.items()]
-        #self.mappings.reverse()
-        #rev_mappings = OrderedDict()
-        #for mapping_item in self.mappings:
-        #    rev_mappings[mapping_item[0]] = mapping_item[1]
-        #self.mappings = rev_mappings
 
     def _soql_for_mapping(self, mapping):
         sf_object = mapping['sf_object']
@@ -430,22 +431,21 @@ class QueryData(BaseSalesforceApiTask):
         self.bulk.close_job(job)
         self.logger.info('Job {0} closed'.format(job))
 
-        field_map = {}
-        for field in self._fields_for_mapping(mapping):
-            field_map[field['sf']] = field['db']
-
-        i = 0
         for result_file in self._get_results(batch, job):
-            reader = unicodecsv.DictReader(result_file, encoding='utf-8')
-            for row in reader:
-                self._import_row(row, mapping, field_map)
-                # Flush inserts to db periodically to avoid eating RAM
-                i += 1
-                if not i % 10000:
-                    self.logger.info('Processed {} rows.'.format(i))
-                    self.session.flush()
-
-        self.session.commit()
+            conn = self.session.connection()
+            with conn.connection.cursor() as cursor:
+                # Map column names
+                reader = csv.reader(result_file)
+                sf_header = reader.next()
+                columns = tuple(mapping['fields'][sf] for sf in sf_header)
+                cursor.copy_expert(
+                    'COPY {} ({}) FROM STDIN WITH (FORMAT CSV)'.format(
+                        mapping['table'],
+                        b','.join(columns),
+                    ),
+                    IteratorBytesIO(result_file),
+                )
+                self.session.commit()
 
     def _get_results(self, batch_id, job_id):
         result_ids = self.bulk.get_query_batch_result_ids(batch_id, job_id=job_id)
@@ -458,35 +458,13 @@ class QueryData(BaseSalesforceApiTask):
                 "job/{0}/batch/{1}/result/{2}".format(
                     job_id, batch_id, result_id),
             )
-            resp = requests.get(uri, headers=self.bulk.headers())
+            resp = requests.get(uri, headers=self.bulk.headers(), stream=True)
+            with tempfile.TemporaryFile('w+b') as f:
+                for chunk in resp.iter_content(chunk_size=None):
+                    f.write(chunk)
+            f.seek(0)
             self.logger.info('Result {} downloaded'.format(result_id))
-            yield io.BytesIO(resp.content)
-
-    def _import_row(self, row, mapping, field_map):
-        model = self.models[mapping['table']]
-        mapped_row = {}
-        for key, value in row.items():
-            if key in mapping.get('lookups', {}):
-                if not value:
-                    mapped_row[field_map[key]] = None
-                    continue
-                # For lookup fields, the value should be the local db id instead of the sf id
-                lookup = mapping['lookups'][key]
-                lookup_model = self.models[lookup['table']]
-                kwargs = { lookup['value_field']: value }
-                res = self.session.query(lookup_model).filter_by(**kwargs).first()
-                if res:
-                    mapped_row[field_map[key]] = res.id
-                else:
-                    mapped_row[field_map[key]] = None
-            else:
-                mapped_row[field_map[key]] = value
-        instance = model()
-        for key, value in mapped_row.items():
-            setattr(instance, key, value)
-        if 'record_type' in mapping:
-            instance.record_type = mapping['record_type']
-        self.session.add(instance)
+            yield f
 
     def _create_tables(self):
         for name, mapping in self.mappings.items():
@@ -512,17 +490,18 @@ class QueryData(BaseSalesforceApiTask):
             self.models[mapping['table']] = type(model_name, (object,), {})
         
         fields = []
-        fields.append(Column('id', Integer, primary_key=True))
-        if 'record_type' in mapping:
-            fields.append(Column('record_type', Unicode(255)))
         for field in self._fields_for_mapping(mapping):
-            fields.append(Column(field['db'], Unicode(255)))
+            field_type = Unicode(255)
+            kw = {}
+            if field['sf'] == 'Id':
+                field_type = Unicode(18)
+                kw['primary_key'] = True
+            fields.append(Column(field['db'], field_type, **kw))
         t = Table(
             mapping['table'],
             self.metadata,
             *fields,
             **table_kwargs
         )
-        
-        
+
         mapper(self.models[mapping['table']], t, **mapper_kwargs)
