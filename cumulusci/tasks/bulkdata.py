@@ -250,7 +250,7 @@ class LoadData(BaseSalesforceApiTask):
 
         total_rows = 0
         batch_num = 0
-        for row in query:
+        for row in query.yield_per(batch_size):
             # TODO iterate over raw encoded values
             if not total_rows % batch_size:
                 batch_num += 1
