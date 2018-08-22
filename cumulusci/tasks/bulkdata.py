@@ -1,5 +1,6 @@
 from cumulusci.tasks.salesforce import BaseSalesforceApiTask
 
+from contextlib import contextmanager
 import csv
 import datetime
 import gzip
@@ -22,6 +23,7 @@ from salesforce_bulk import CsvDictsAdapter
 from salesforce_bulk.util import IteratorBytesIO
 
 from sqlalchemy.ext.automap import automap_base
+from sqlalchemy.inspection import inspect
 from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import Session
@@ -147,83 +149,61 @@ class LoadData(BaseSalesforceApiTask):
     def _run_task(self):
         self._init_mapping()
         self._init_db()
+        self._sf_id_map = {}
 
         for name, mapping in self.mapping.items():
-            api = mapping.get('api', 'bulk')
             if mapping.get('retrieve_only', False):
                 continue
 
-            self.logger.info('Running Job: {} with {} API'.format(name, api))
-            rows = self._get_batches(mapping)
+            self.logger.info('Running Job: {}'.format(name))
+            self._load_mapping(mapping)
 
-            if api is 'bulk':
-                self._upload_batches(mapping, rows)
-            elif api is 'sobject':
-                self._sobject_api_upload_batches(mapping, rows)
-
-    def _sobject_api_upload_batches(self, mapping, batches):
-        for batch, batch_rows in batches:
-            pass
-
-    def _create_job(self, mapping):
-        action = mapping.get('action', 'insert')
-        job_id = None
-
-        if action == 'insert':
-            job_id = self.bulk.create_insert_job(mapping['sf_object'], contentType='CSV')
-
-        if not job_id:
-            self.logger.error('  No handler for action type {}'.format(action))
-
-        self.logger.info('  Created bulk job {}'.format(job_id))
-
-        return job_id
-
-    def _upload_batches(self, mapping, batches):
-        job_id = None
-        table = self.tables[mapping.get('table')]
-
-        for batch, batch_rows in batches:
-            if not job_id:
-                # Create a job only once we have the first batch to load into it
-                job_id = self._create_job(mapping)
-
-            # Prepare the rows
-            rows = CsvDictsAdapter(iter(batch))
-
-            # Create the batch
-            batch_id = self.bulk.post_batch(job_id, rows)
+    def _load_mapping(self, mapping):
+        table = mapping['table']
+        job_id = self._create_job(mapping)
+        for batch_file, local_ids in self._get_batches(mapping):
+            batch_id = self.bulk.post_batch(job_id, batch_file)
             self.logger.info('    Uploaded batch {}'.format(batch_id))
+
+            # Wait for batch to complete
             while not self.bulk.is_batch_done(batch_id, job_id):
                 self.logger.info('      Checking batch status...')
                 time.sleep(10)
-            
-            # Wait for batch to complete
             res = self.bulk.wait_for_batch(job_id, batch_id)
             self.logger.info('      Batch {} complete'.format(batch_id))
 
-            # salesforce_bulk is broken in fetching id results so do it manually
+            # Fetch results and update id mapping
+            # (salesforce_bulk is broken in fetching id results so do it manually)
             results_url = '{}/job/{}/batch/{}/result'.format(self.bulk.endpoint, job_id, batch_id)
-            headers = self.bulk.headers()
-            resp = requests.get(results_url, headers=headers)
-            csv_file = tempfile.TemporaryFile()
-            csv_file.write(resp.content)
-            csv_file.seek(0)
-            reader = csv.DictReader(csv_file)
+            # TODO log failed results
+            with _download_file(results_url, self.bulk) as f:
+                i = 0
+                reader = csv.reader(f)
+                reader.next()  # skip header
+                for row in reader:
+                    if row[1] == 'true':
+                        local_id = str(local_ids[i])
+                        sf_id = row[0]
+                        self._sf_id_map[(table, local_id)] = sf_id
+                    else:
+                        self.logger.warning('      Error on row {}: {}'.format(i, row[3]))
+                    i += 1
+            self.logger.info('      Updated Id mapping from batch {}'.format(batch_id))
 
-            # Write to the local Id column on the uploaded rows
-            i = 0
-            for result in reader:
-                row = batch_rows[i]
-                i += 1
-                if result['Id']:
-                    setattr(row, mapping['fields']['Id'], result['Id'])
-
-            # Commit to the db
-            self.session.commit()
-        
         self.bulk.close_job(job_id)
-        
+
+    def _create_job(self, mapping):
+        action = mapping.get('action', 'insert')
+
+        if action == 'insert':
+            job_id = self.bulk.create_insert_job(mapping['sf_object'], contentType='CSV')
+        else:
+            self.logger.error('  No handler for action type {}'.format(action))
+            return
+
+        self.logger.info('  Created bulk job {}'.format(job_id))
+        return job_id
+
     def _query_db(self, mapping):
         table = self.tables[mapping.get('table')]
 
@@ -235,11 +215,7 @@ class LoadData(BaseSalesforceApiTask):
             query = query.filter(*filter_args)
         return query
 
-
-    def _get_batches(self, mapping, batch_size=None):
-        if batch_size is None:
-            batch_size = 10000
-
+    def _get_batches(self, mapping, batch_size=10000):
         action = mapping.get('action', 'insert')
         fields = mapping.get('fields', {}).copy()
         static = mapping.get('static', {})
@@ -247,14 +223,18 @@ class LoadData(BaseSalesforceApiTask):
         record_type = mapping.get('record_type')
 
         # Skip Id field on insert
+        id_column = fields.get('Id', 'id')
         if action == 'insert' and 'Id' in fields:
             del fields['Id']
 
         # Build the list of fields to import
-        import_fields = fields.keys() + static.keys() + lookups.keys()
+        columns = []
+        columns.extend(fields.keys())
+        columns.extend(static.keys())
+        columns.extend(lookups.keys())
 
         if record_type:
-            import_fields.append('RecordTypeId')
+            columns.append('RecordTypeId')
             # default to the profile assigned recordtype if we can't find any
             # query for the RT by developer name
             try:
@@ -269,59 +249,62 @@ class LoadData(BaseSalesforceApiTask):
         query = self._query_db(mapping)
 
         total_rows = 0
-        batch_num = 1
-        batch = []
-        batch_rows = []
-
+        batch_num = 0
         for row in query:
+            # TODO iterate over raw encoded values
+            if not total_rows % batch_size:
+                batch_num += 1
+                if batch_num > 1:
+                    batch_file.seek(0)
+                    self.logger.info('    Processing batch {}'.format(batch_num))
+                    yield batch_file, batch_ids
+                batch_file = io.BytesIO()
+                writer = csv.writer(batch_file)
+                writer.writerow(columns)
+                batch_ids = []
             total_rows += 1
 
             # Get the row data from the mapping and database values
-            csv_row = {}
+            csv_row = []
             for key, value in fields.items():
-                csv_row[key] = getattr(row, value)
+                csv_row.append(getattr(row, value))
             for key, value in static.items():
-                csv_row[key] = value
+                csv_row.append(value)
             for key, lookup in lookups.items():
-                kwargs = {lookup['join_field']: getattr(row, lookup['key_field'])}
+                lookup_table = lookup['table']
                 try:
-                    res = self.session.query(self.tables[lookup['table']]).filter_by(**kwargs).one()
-                    csv_row[key] = getattr(res, lookup['value_field'])
-                except:
-                    csv_row[key] = None
+                    local_id = getattr(row, lookup['key_field'])
+                    try:
+                        local_id = int(local_id)
+                    except:
+                        pass
+                    local_id = str(local_id)
+                    sf_id = self._sf_id_map[(lookup_table, local_id)]
+                    csv_row.append(sf_id)
+                except KeyError:
+                    csv_row.append(None)
             if record_type:
-                csv_row['RecordTypeId'] = record_type_id
+                csv_row.append(record_type_id)
 
-            # utf-8 encode row values
-            for key, value in csv_row.items():
-                if value:
-                    if isinstance(value, datetime.datetime):
-                        csv_row[key] = value.isoformat()
-                    else:
-                        try:
-                            csv_row[key] = value.encode('utf8')
-                        except AttributeError:
-                            continue
+            writer.writerow([self._convert(value) for value in csv_row])
+            pkey = inspect(row).identity[0]
+            batch_ids.append(pkey)
 
-            # Write to csv file
-            batch.append(csv_row)
-
-            batch_rows.append(row)
-
-            # Slice into batches
-            if len(batch) == batch_size:
-                self.logger.info('    Processing batch {}'.format(batch_num))
-                yield batch, batch_rows
-
-                # Start the next batch
-                batch_num += 1
-                batch = []
-                batch_rows = []
+        if batch_ids:
+            batch_file.seek(0)
+            yield batch_file, batch_ids
 
         self.logger.info('  Prepared {} rows for import to {}'.format(total_rows, mapping['sf_object']))
 
-        if batch:
-            yield batch, batch_rows
+    def _convert(self, value):
+        if value:
+            if isinstance(value, datetime.datetime):
+                return value.isoformat()
+            else:
+                try:
+                    return value.encode('utf8')
+                except AttributeError:
+                    pass
 
     def _init_db(self):
         # initialize the DB engine
@@ -477,11 +460,7 @@ class QueryData(BaseSalesforceApiTask):
                 "job/{0}/batch/{1}/result/{2}".format(
                     job_id, batch_id, result_id),
             )
-            resp = requests.get(uri, headers=self.bulk.headers(), stream=True)
-            with tempfile.TemporaryFile('w+b') as f:
-                for chunk in resp.iter_content(chunk_size=None):
-                    f.write(chunk)
-                f.seek(0)
+            with _download_file(uri, self.bulk) as f:
                 self.logger.info('Result {} downloaded'.format(result_id))
                 yield f
 
@@ -527,3 +506,12 @@ class QueryData(BaseSalesforceApiTask):
         )
 
         mapper(self.models[mapping['table']], t, **mapper_kwargs)
+
+@contextmanager
+def _download_file(uri, bulk_api):
+    resp = requests.get(uri, headers=bulk_api.headers(), stream=True)
+    with tempfile.TemporaryFile('w+b') as f:
+        for chunk in resp.iter_content(chunk_size=None):
+            f.write(chunk)
+        f.seek(0)
+        yield f
