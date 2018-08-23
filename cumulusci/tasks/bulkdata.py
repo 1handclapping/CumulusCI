@@ -64,6 +64,10 @@ class DeleteData(BaseSalesforceApiTask):
         'objects': {
             'description': 'A list of objects to delete records from in order of deletion.  If passed via command line, use a comma separated string',
             'required': True,
+        },
+        'operation': {
+            'description': 'Bulk operation to perform (delete or hardDelete)',
+            'required': True,
         }
     }
 
@@ -95,7 +99,7 @@ class DeleteData(BaseSalesforceApiTask):
                 continue
 
             # Delete the records
-            delete_job = self.bulk.create_delete_job(obj, contentType='CSV')
+            delete_job = self.bulk.create_job(obj, self.options['operation'])
             self.logger.info('  Deleting {} {} records'.format(len(delete_rows), obj))
             batch_num = 1
             for batch in self._upload_batch(delete_job, delete_rows):
@@ -253,8 +257,7 @@ class LoadData(BaseSalesforceApiTask):
         for row in query.yield_per(batch_size):
             # TODO iterate over raw encoded values
             if not total_rows % batch_size:
-                batch_num += 1
-                if batch_num > 1:
+                if batch_num > 0:
                     batch_file.seek(0)
                     self.logger.info('    Processing batch {}'.format(batch_num))
                     yield batch_file, batch_ids
@@ -262,6 +265,7 @@ class LoadData(BaseSalesforceApiTask):
                 writer = csv.writer(batch_file)
                 writer.writerow(columns)
                 batch_ids = []
+                batch_num += 1
             total_rows += 1
 
             # Get the row data from the mapping and database values
