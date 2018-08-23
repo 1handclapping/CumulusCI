@@ -493,6 +493,8 @@ class QueryData(BaseSalesforceApiTask):
                         if not column:
                             column = mapping['lookups'][sf]['key_field']
                     columns.append(column)
+                if not columns:
+                    continue
                 record_type = mapping.get('record_type')
                 if record_type:
                     columns.append('record_type')
