@@ -486,7 +486,12 @@ class QueryData(BaseSalesforceApiTask):
                 for sf in sf_header:
                     if sf == 'Records not found for this query':
                         continue
-                    column = mapping['fields'].get(sf) or mapping['lookups'][sf]['key_field']
+                    if sf == 'Id':
+                        column = 'id'
+                    else:
+                        column = mapping['fields'].get(sf)
+                        if not column:
+                            column = mapping['lookups'][sf]['key_field']
                     columns.append(column)
                 record_type = mapping.get('record_type')
                 if record_type:
@@ -543,15 +548,10 @@ class QueryData(BaseSalesforceApiTask):
             self.models[mapping['table']] = type(model_name, (object,), {})
         
         fields = []
+        fields.append(Column('id', Unicode(255), primary_key=True))
         for field in self._fields_for_mapping(mapping):
-            field_type = Unicode(255)
-            kw = {}
-            if field['sf'] == 'Id':
-                field_type = Unicode(18)
-                kw['primary_key'] = True
-            fields.append(Column(field['db'], field_type, **kw))
-        record_type = mapping.get('record_type')
-        if record_type:
+            fields.append(Column(field['db'], Unicode(255)))
+        if 'record_type' in mapping:
             fields.append(Column('record_type', Unicode(255)))
         t = Table(
             mapping['table'],
