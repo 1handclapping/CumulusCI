@@ -202,31 +202,36 @@ class LoadData(BaseSalesforceApiTask):
             return batch_status
 
         # Get results and update table with inserted ids
+        table = self.metadata.tables[mapping['table']]
         model = self.tables[mapping['table']]
         id_column = inspect(model).primary_key[0].name
         sf_id_column = mapping['fields']['Id']
         for batch_id, local_ids in local_ids_for_batch.items():
             results_url = '{}/job/{}/batch/{}/result'.format(self.bulk.endpoint, job_id, batch_id)
-            mappings = []
+            updates = []
             with _download_file(results_url, self.bulk) as f:
+                self.logger.info('  Downloaded results for batch {}'.format(batch_id))
                 i = 0
                 reader = csv.reader(f)
                 reader.next()  # skip header
                 for row in reader:
                     if row[1] == 'true':
-                        mappings.append({
-                            id_column: local_ids[i],
-                            sf_id_column: row[0],
+                        updates.append({
+                            'id': local_ids[i],
+                            'sf_id': row[0],
                         })
                     else:
                         self.logger.warning('      Error on row {}: {}'.format(i, row[3]))
                     i += 1
-            self.session.bulk_update_mappings(
-                model,
-                mappings,
+            update_statement = table.update().where(
+                getattr(table.c, id_column) == bindparam('id')
+            ).values(
+                **{sf_id_column: bindparam('sf_id')}
             )
-            self.session.commit()
-            self.logger.info('  Updated {} in {} table'.format(sf_id_column, mapping['table']))
+            self.session.connection().execute(update_statement, updates)
+            self.session.flush()
+            self.logger.info('  Updated {} in {} table for batch {}'.format(sf_id_column, mapping['table'], batch_id))
+        self.session.commit()
 
         return 'Completed'
 
