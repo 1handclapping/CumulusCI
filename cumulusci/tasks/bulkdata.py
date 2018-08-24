@@ -295,11 +295,13 @@ class LoadData(BaseSalesforceApiTask):
         fields = mapping['fields'].copy()
         del fields['Id']
         fields = fields.values()
-        lookups = mapping.get('lookups', {}).values()
+        lookups = mapping.get('lookups', {}).copy().values()
         lookup_columns = {}
         for lookup in lookups:
-            lookup_table = self.metadata.tables['{}_sf_ids'.format(lookup['table'])]
-            lookup_columns[lookup['key_field']] = lookup_table.columns.sf_id
+            lookup['aliased_table'] = aliased(
+                self.metadata.tables['{}_sf_ids'.format(lookup['table'])]
+            )
+            lookup_columns[lookup['key_field']] = lookup['aliased_table'].columns.sf_id
         columns = [model.id]
         for c in model.__table__.columns:
             if c.key in fields:
@@ -318,8 +320,7 @@ class LoadData(BaseSalesforceApiTask):
         for lookup in lookups:
             # Join
             value_column = getattr(model, lookup['key_field'])
-            lookup_table = self.metadata.tables['{}_sf_ids'.format(lookup['table'])]
-            query = query.filter(lookup_table.columns.id == value_column)
+            query = query.filter(lookup['aliased_table'].columns.id == value_column)
             # Order by foreign key to minimize lock contention
             # by trying to keep lookup targets in the same batch
             lookup_column = getattr(model, lookup['key_field'])
