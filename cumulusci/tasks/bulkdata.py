@@ -319,9 +319,13 @@ class LoadData(BaseSalesforceApiTask):
                 filter_args.append(text(f))
             query = query.filter(*filter_args)
         for lookup in lookups:
-            # Join
+            # Outer join with lookup ids table:
+            # returns main obj even if lookup is null
             value_column = getattr(model, lookup['key_field'])
-            query = query.filter(lookup['aliased_table'].columns.id == value_column)
+            query = query.outerjoin(
+                lookup['aliased_table'],
+                lookup['aliased_table'].columns.id == value_column,
+            )
             # Order by foreign key to minimize lock contention
             # by trying to keep lookup targets in the same batch
             lookup_column = getattr(model, lookup['key_field'])
