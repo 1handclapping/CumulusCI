@@ -227,17 +227,21 @@ class LoadData(BaseSalesforceApiTask):
             return batch_status
 
         # Get results and create table with inserted ids
+        if not hasattr(self, '_initialized_id_tables'):
+            self._initialized_id_tables = set()
         id_table_name = '{}_sf_ids'.format(mapping['table'])
-        if id_table_name in self.metadata.tables:
-            self.metadata.remove(self.metadata.tables[id_table_name])
-        id_table = Table(
-            id_table_name, self.metadata,
-            Column('id', Unicode(255), primary_key=True),
-            Column('sf_id', Unicode(18)),
-        )
-        if id_table.exists():
-            id_table.drop()
-        id_table.create()
+        if id_table_name not in self._initialized_id_tables:
+            if id_table_name in self.metadata.tables:
+                self.metadata.remove(self.metadata.tables[id_table_name])
+            id_table = Table(
+                id_table_name, self.metadata,
+                Column('id', Unicode(255), primary_key=True),
+                Column('sf_id', Unicode(18)),
+            )
+            if id_table.exists():
+                id_table.drop()
+            id_table.create()
+            self._initialized_id_tables.add(id_table_name)
         conn = self.session.connection()
         for batch_id, local_ids in local_ids_for_batch.items():
             results_url = '{}/job/{}/batch/{}/result'.format(self.bulk.endpoint, job_id, batch_id)
