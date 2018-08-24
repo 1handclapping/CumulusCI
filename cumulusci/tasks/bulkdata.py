@@ -252,6 +252,8 @@ class LoadData(BaseSalesforceApiTask):
         table = self.tables[mapping.get('table')]
 
         query = self.session.query(table)
+        if 'record_type' in mapping:
+            query = query.filter_by(record_type=mapping['record_type'])
         if 'filters' in mapping:
             filter_args = []
             for f in mapping['filters']:
