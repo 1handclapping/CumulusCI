@@ -27,6 +27,7 @@ from sqlalchemy.inspection import inspect
 from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import Session
+from sqlalchemy import bindparam
 from sqlalchemy import create_engine
 from sqlalchemy import Column
 from sqlalchemy import Integer
@@ -172,16 +173,19 @@ class LoadData(BaseSalesforceApiTask):
                 break
 
     def _load_mapping(self, mapping):
-        job_id = self.bulk.create_insert_job(mapping['sf_object'], contentType='CSV')
-        self.logger.info('  Created bulk job {}'.format(job_id))
+        if 'job_id' in self.options:
+            job_id = self.options['job_id']
+        else:
+            job_id = self.bulk.create_insert_job(mapping['sf_object'], contentType='CSV')
+            self.logger.info('  Created bulk job {}'.format(job_id))
 
-        # Upload batches
-        local_ids_for_batch = {}
-        for batch_file, local_ids in self._get_batches(mapping):
-            batch_id = self.bulk.post_batch(job_id, batch_file)
-            local_ids_for_batch[batch_id] = local_ids
-            self.logger.info('    Uploaded batch {}'.format(batch_id))
-        self.bulk.close_job(job_id)
+            # Upload batches
+            local_ids_for_batch = {}
+            for batch_file, local_ids in self._get_batches(mapping):
+                batch_id = self.bulk.post_batch(job_id, batch_file)
+                local_ids_for_batch[batch_id] = local_ids
+                self.logger.info('    Uploaded batch {}'.format(batch_id))
+            self.bulk.close_job(job_id)
 
         # Wait for job to complete
         while True:
@@ -350,7 +354,8 @@ class LoadData(BaseSalesforceApiTask):
 
     def _load_lookup_ids(self, mapping):
         id_map = {}
-        for lookup in mapping.get('lookups', {}).values():
+        for name, lookup in mapping.get('lookups', {}).items():
+            self.logger.info('Loading lookup mapping: {}'.format(name))
             table = lookup['table']
             model = self.tables[table]
             id_column = getattr(model, lookup['join_field'])
