@@ -105,12 +105,35 @@ class DeleteData(BaseSalesforceApiTask):
             batch_num = 1
             for batch in self._upload_batch(delete_job, delete_rows):
                 self.logger.info('    Uploaded batch {}'.format(batch))
-                while not self.bulk.is_batch_done(batch, delete_job):
-                    self.logger.info('      Checking status of batch {0}'.format(batch_num))
-                    time.sleep(10)
-                self.logger.info('      Batch {} complete'.format(batch))
                 batch_num += 1
             self.bulk.close_job(delete_job)
+
+            while True:
+                job_status = self.bulk.job_status(delete_job)
+                self.logger.info('    Waiting for job {} ({}/{})'.format(
+                    delete_job,
+                    job_status['numberBatchesCompleted'],
+                    job_status['numberBatchesTotal'],
+                ))
+                batch_status = self._get_batch_status(delete_job)
+                if batch_status == 'InProgress':
+                    time.sleep(10)
+                    continue
+                self.logger.info('  Job {} finished with result: {}'.format(delete_job, batch_status))
+                break
+
+    def _get_batch_status(self, job_id):
+        uri = urlparse.urljoin(self.bulk.endpoint + "/", 'job/{0}/batch'.format(job_id))
+        response = requests.get(uri, headers=self.bulk.headers())
+        completed = True
+        tree = ET.fromstring(response.content)
+        for el in tree.iterfind('.//{%s}state' % self.bulk.jobNS):
+            state = el.text
+            if state == 'Failed':
+                return 'Failed'
+            if state != 'Completed':
+                completed = False
+        return 'Completed' if completed else 'InProgress'
 
     def _split_batches(self, data, batch_size):
         """Yield successive n-sized chunks from l."""
@@ -119,7 +142,7 @@ class DeleteData(BaseSalesforceApiTask):
 
     def _upload_batch(self, job, data):
         # Split into batches
-        batches = self._split_batches(data, 2500)
+        batches = self._split_batches(data, 10000)
 
         uri = "{}/job/{}/batch".format(self.bulk.endpoint, job)
         headers = self.bulk.headers({"Content-Type": "text/csv"})
@@ -137,7 +160,7 @@ class DeleteData(BaseSalesforceApiTask):
             batch_id = tree.findtext("{%s}id" % self.bulk.jobNS)
 
             yield batch_id
-        
+
 class LoadData(BaseSalesforceApiTask):
 
     task_options = {
