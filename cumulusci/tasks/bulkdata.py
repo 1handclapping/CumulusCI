@@ -153,6 +153,10 @@ class LoadData(BaseSalesforceApiTask):
             'description': 'If specified, only run this step from the mapping',
             'required': False,
         },
+        'job_id': {
+            'description': 'Job id',
+            'required': False,
+        }
     }
 
     def _run_task(self):
