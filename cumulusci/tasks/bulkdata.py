@@ -259,6 +259,10 @@ class LoadData(BaseSalesforceApiTask):
             for f in mapping['filters']:
                 filter_args.append(text(f))
             query = query.filter(*filter_args)
+        if 'lookups' in mapping:
+            lookup = mapping['lookups'].values()[0]
+            column = getattr(table, lookup['key_field'])
+            query = query.order_by(column)
         return query
 
     def _get_batches(self, mapping, batch_size=10000):
