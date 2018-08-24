@@ -326,6 +326,7 @@ class LoadData(BaseSalesforceApiTask):
             # by trying to keep lookup targets in the same batch
             lookup_column = getattr(model, lookup['key_field'])
             query = query.order_by(lookup_column)
+        self.logger.info(str(query))
         return query
 
     def _get_batches(self, mapping, batch_size=10000):
