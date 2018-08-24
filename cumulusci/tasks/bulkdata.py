@@ -153,10 +153,6 @@ class LoadData(BaseSalesforceApiTask):
             'description': 'If specified, only run this step from the mapping',
             'required': False,
         },
-        'job_id': {
-            'description': 'Job id',
-            'required': False,
-        }
     }
 
     def _run_task(self):
@@ -177,19 +173,16 @@ class LoadData(BaseSalesforceApiTask):
                 break
 
     def _load_mapping(self, mapping):
-        if 'job_id' in self.options:
-            job_id = self.options['job_id']
-        else:
-            job_id = self.bulk.create_insert_job(mapping['sf_object'], contentType='CSV')
-            self.logger.info('  Created bulk job {}'.format(job_id))
+        job_id = self.bulk.create_insert_job(mapping['sf_object'], contentType='CSV')
+        self.logger.info('  Created bulk job {}'.format(job_id))
 
-            # Upload batches
-            local_ids_for_batch = {}
-            for batch_file, local_ids in self._get_batches(mapping):
-                batch_id = self.bulk.post_batch(job_id, batch_file)
-                local_ids_for_batch[batch_id] = local_ids
-                self.logger.info('    Uploaded batch {}'.format(batch_id))
-            self.bulk.close_job(job_id)
+        # Upload batches
+        local_ids_for_batch = {}
+        for batch_file, local_ids in self._get_batches(mapping):
+            batch_id = self.bulk.post_batch(job_id, batch_file)
+            local_ids_for_batch[batch_id] = local_ids
+            self.logger.info('    Uploaded batch {}'.format(batch_id))
+        self.bulk.close_job(job_id)
 
         # Wait for job to complete
         while True:
