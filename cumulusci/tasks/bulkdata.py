@@ -5,6 +5,7 @@ import csv
 import datetime
 import gzip
 import io
+import itertools
 import os
 import requests
 import shutil
@@ -225,38 +226,50 @@ class LoadData(BaseSalesforceApiTask):
         if batch_status != 'Completed':
             return batch_status
 
-        # Get results and update table with inserted ids
-        table = self.metadata.tables[mapping['table']]
-        model = self.tables[mapping['table']]
-        id_column = inspect(model).primary_key[0].name
-        sf_id_column = mapping['fields']['Id']
+        # Get results and create table with inserted ids
+        id_table_name = '{}_sf_ids'.format(mapping['table'])
+        if id_table_name in self.metadata.tables:
+            self.metadata.remove(self.metadata.tables[id_table_name])
+        id_table = Table(
+            id_table_name, self.metadata,
+            Column('id', Unicode(255), primary_key=True),
+            Column('sf_id', Unicode(18)),
+        )
+        if id_table.exists():
+            id_table.drop()
+        id_table.create()
+        conn = self.session.connection()
         for batch_id, local_ids in local_ids_for_batch.items():
             results_url = '{}/job/{}/batch/{}/result'.format(self.bulk.endpoint, job_id, batch_id)
             updates = []
             with _download_file(results_url, self.bulk) as f:
                 self.logger.info('  Downloaded results for batch {}'.format(batch_id))
-                i = 0
-                reader = csv.reader(f)
-                reader.next()  # skip header
-                for row in reader:
-                    if row[1] == 'true':
-                        updates.append({
-                            'id': local_ids[i],
-                            'sf_id': row[0],
-                        })
-                    else:
-                        self.logger.warning('      Error on row {}: {}'.format(i, row[3]))
-                    i += 1
-            update_statement = table.update().where(
-                getattr(table.c, id_column) == bindparam('id')
-            ).values(
-                **{sf_id_column: bindparam('sf_id')}
-            )
-            self.session.connection().execute(update_statement, updates)
-            self.session.flush()
-            self.logger.info('  Updated {} in {} table for batch {}'.format(sf_id_column, mapping['table'], batch_id))
-        self.session.commit()
 
+                def produce_csv():
+                    reader = csv.reader(f)
+                    next(reader)  # skip header
+                    i = 0
+                    for row, local_id in itertools.izip(reader, local_ids):
+                        if row[1] == 'true':
+                            sf_id = row[0]
+                            yield '{},{}\n'.format(local_id, sf_id)
+                        else:
+                            self.logger.warning('      Error on row {}: {}'.format(i, row[3]))
+                        i += 1
+
+                with conn.connection.cursor() as cursor:
+                    cursor.copy_expert(
+                        'COPY {} ({}) FROM STDIN WITH (FORMAT CSV)'.format(
+                            id_table_name,
+                            b'id,sf_id',
+                        ),
+                        IteratorBytesIO(produce_csv()),
+                    )
+                    self.session.flush()
+
+            self.logger.info('  Updated {} for batch {}'.format(id_table, batch_id))
+
+        self.session.commit()
         return 'Completed'
 
     def _get_batch_status(self, job_id):
@@ -273,20 +286,40 @@ class LoadData(BaseSalesforceApiTask):
         return 'Completed' if completed else 'InProgress'
 
     def _query_db(self, mapping):
-        table = self.tables[mapping.get('table')]
+        model = self.tables[mapping.get('table')]
 
-        query = self.session.query(table)
+        fields = mapping['fields'].copy()
+        del fields['Id']
+        fields = fields.values()
+        lookups = mapping.get('lookups', {}).values()
+        lookup_columns = {}
+        for lookup in lookups:
+            lookup_table = self.metadata.tables['{}_sf_ids'.format(lookup['table'])]
+            lookup_columns[lookup['key_field']] = lookup_table.columns.sf_id
+        columns = [model.id]
+        for c in model.__table__.columns:
+            if c.key in fields:
+                columns.append(c)
+            elif c.key in lookup_columns:
+                columns.append(lookup_columns[c.key])
+
+        query = self.session.query(*columns)
         if 'record_type' in mapping:
-            query = query.filter_by(record_type=mapping['record_type'])
+            query = query.filter(model.record_type == mapping['record_type'])
         if 'filters' in mapping:
             filter_args = []
             for f in mapping['filters']:
                 filter_args.append(text(f))
             query = query.filter(*filter_args)
-        if 'lookups' in mapping:
-            lookup = mapping['lookups'].values()[0]
-            column = getattr(table, lookup['key_field'])
-            query = query.order_by(column)
+        for lookup in lookups:
+            # Join
+            value_column = getattr(model, lookup['key_field'])
+            lookup_table = self.metadata.tables['{}_sf_ids'.format(lookup['table'])]
+            query = query.filter(lookup_table.columns.id == value_column)
+            # Order by foreign key to minimize lock contention
+            # by trying to keep lookup targets in the same batch
+            lookup_column = getattr(model, lookup['key_field'])
+            query = query.order_by(lookup_column)
         return query
 
     def _get_batches(self, mapping, batch_size=10000):
@@ -304,9 +337,8 @@ class LoadData(BaseSalesforceApiTask):
         # Build the list of fields to import
         columns = []
         columns.extend(fields.keys())
-        columns.extend(static.keys())
         columns.extend(lookups.keys())
-
+        columns.extend(static.keys())
         if record_type:
             columns.append('RecordTypeId')
             # default to the profile assigned recordtype if we can't find any
@@ -320,12 +352,11 @@ class LoadData(BaseSalesforceApiTask):
             except (KeyError, IndexError):
                 record_type_id = None
 
-        if lookups:
-            sf_id_map = self._load_lookup_ids(mapping)
         query = self._query_db(mapping)
 
         total_rows = 0
         batch_num = 0
+        batch_ids = []
         for row in query.yield_per(batch_size):
             # TODO iterate over raw encoded values
             if not total_rows % batch_size:
@@ -340,30 +371,13 @@ class LoadData(BaseSalesforceApiTask):
                 batch_num += 1
             total_rows += 1
 
-            # Get the row data from the mapping and database values
-            csv_row = []
-            for key, value in fields.items():
-                csv_row.append(getattr(row, value))
-            for key, value in static.items():
-                csv_row.append(value)
-            for key, lookup in lookups.items():
-                lookup_table = lookup['table']
-                local_id = getattr(row, lookup['key_field'])
-                try:
-                    local_id = int(local_id)
-                except (TypeError, ValueError):
-                    pass
-                try:
-                    sf_id = sf_id_map[lookup_table][local_id]
-                except KeyError:
-                    csv_row.append(None)
-                else:
-                    csv_row.append(sf_id)
+            # Add static values
+            pkey = row[0]
+            row = list(row[1:]) + static.values()
             if record_type:
-                csv_row.append(record_type_id)
+                row.append(record_type_id)
 
-            writer.writerow([self._convert(value) for value in csv_row])
-            pkey = inspect(row).identity[0]
+            writer.writerow([self._convert(value) for value in row])
             batch_ids.append(pkey)
 
         if batch_ids:
@@ -371,19 +385,6 @@ class LoadData(BaseSalesforceApiTask):
             yield batch_file, batch_ids
 
         self.logger.info('  Prepared {} rows for import to {}'.format(total_rows, mapping['sf_object']))
-
-    def _load_lookup_ids(self, mapping):
-        id_map = {}
-        for name, lookup in mapping.get('lookups', {}).items():
-            self.logger.info('Loading lookup mapping: {}'.format(name))
-            table = lookup['table']
-            model = self.tables[table]
-            id_column = getattr(model, lookup['join_field'])
-            sf_id_column = getattr(model, lookup['value_field'])
-            id_map[table] = obj_id_map = {}
-            for row in self.session.query(id_column, sf_id_column).yield_per(10000):
-                obj_id_map[row[0]] = row[1]
-        return id_map
 
     def _convert(self, value):
         if value:
@@ -510,8 +511,8 @@ class QueryData(BaseSalesforceApiTask):
         self.bulk.close_job(job)
         self.logger.info('Job {0} closed'.format(job))
 
+        conn = self.session.connection()
         for result_file in self._get_results(batch, job):
-            conn = self.session.connection()
             with conn.connection.cursor() as cursor:
                 # Map column names
                 reader = csv.reader(result_file)
