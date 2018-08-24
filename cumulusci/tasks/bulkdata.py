@@ -349,12 +349,10 @@ class LoadData(BaseSalesforceApiTask):
         for lookup in mapping.get('lookups', {}).values():
             table = lookup['table']
             model = self.tables[table]
-            # id_column = self.metadata.tables[table].columns[lookup['join_field']]
-            # sf_id_column = self.metadata.tables[table].columns[lookup['value_field']]
             id_column = getattr(model, lookup['join_field'])
             sf_id_column = getattr(model, lookup['value_field'])
             id_map[table] = obj_id_map = {}
-            for row in self.session.query(id_column, sf_id_column):
+            for row in self.session.query(id_column, sf_id_column).yield_per(10000):
                 obj_id_map[row[0]] = row[1]
         return id_map
 
