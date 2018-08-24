@@ -25,6 +25,7 @@ from salesforce_bulk.util import IteratorBytesIO
 
 from sqlalchemy.ext.automap import automap_base
 from sqlalchemy.inspection import inspect
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm import create_session
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import Session
