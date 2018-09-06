@@ -297,18 +297,14 @@ class LoadData(BaseSalesforceApiTask):
         del fields['Id']
         fields = fields.values()
         lookups = mapping.get('lookups', {}).copy().values()
-        lookup_columns = {}
+        columns = [model.id]
+        for f in fields:
+            columns.append(model.__table__.columns[f])
         for lookup in lookups:
             lookup['aliased_table'] = aliased(
                 self.metadata.tables['{}_sf_ids'.format(lookup['table'])]
             )
-            lookup_columns[lookup['key_field']] = lookup['aliased_table'].columns.sf_id
-        columns = [model.id]
-        for c in model.__table__.columns:
-            if c.key in fields:
-                columns.append(c)
-            elif c.key in lookup_columns:
-                columns.append(lookup_columns[c.key])
+            columns.append(lookup['aliased_table'].columns.sf_id)
 
         query = self.session.query(*columns)
         if 'record_type' in mapping:
