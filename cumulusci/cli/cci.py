@@ -726,14 +726,18 @@ def org_connect(config, org_name, sandbox, login_url, default, global_org):
 )
 @pass_config
 def org_default(config, org_name, unset):
-
+    org_name, org_config = config.get_org(org_name)
     if unset:
         config.keychain.unset_default_org()
+        if org_config.scratch:
+            org_config.set_sfdx_org_default(unset=True)
         click.echo(
             "{} is no longer the default org.  No default org set.".format(org_name)
         )
     else:
         config.keychain.set_default_org(org_name)
+        if org_config.scratch:
+            org_config.set_sfdx_org_default()
         click.echo("{} is now the default org".format(org_name))
 
 

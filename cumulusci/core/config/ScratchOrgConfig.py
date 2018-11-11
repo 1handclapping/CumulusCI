@@ -301,3 +301,12 @@ class ScratchOrgConfig(OrgConfig):
 
         # Get org info via sfdx force:org:display
         self.scratch_info
+    
+    def set_sfdx_org_default(self, unset=False):
+        """ Uses sfdx force:config:set to set the default org in sfdx project """
+
+        username = self.username if not unset else ""
+        command = sarge.shell_format("sfdx force:config:set defaultusername={0}", username)
+        p = sarge.Command(command, stdout=sarge.Capture(buffer_size=-1), shell=True)
+        p.run()
+
